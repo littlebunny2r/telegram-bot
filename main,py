@@ -1,0 +1,266 @@
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+
+BOT_TOKEN = "8329727441:AAGlbHc4_lIIgIWxzFZivxxaztxmqqGClKo"
+
+waiting_list = []
+active_chats = {}
+user_gender = {}
+banned_users = set()
+ADMINS = [7805945158]  # Ganti dengan ID admin
+
+GROUP_USERNAME = "@Ngobrol_Santuyyy"
+GROUP_LINK = "https://t.me/Ngobrol_Santuyyy"
+
+# ---------------- Helper ----------------
+def is_admin(user_id):
+    return user_id in ADMINS
+
+async def end_chat(user_id, context):
+    if user_id in active_chats:
+        partner_id = active_chats[user_id]
+        if partner_id in active_chats:
+            del active_chats[partner_id]
+            await context.bot.send_message(partner_id, "🚫 Partner kamu meninggalkan obrolan.")
+        del active_chats[user_id]
+
+async def check_group_membership(update: Update, context):
+    user_id = update.effective_user.id
+    try:
+        member = await context.bot.get_chat_member(GROUP_USERNAME, user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except:
+        return False
+
+async def send_join_prompt(update: Update, message="⚠️ Kamu harus bergabung ke grup dulu sebelum pakai bot!"):
+    keyboard = [[InlineKeyboardButton("🔗 Gabung Sekarang", url=GROUP_LINK)]]
+    await update.message.reply_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
+
+# ---------------- Tombol Dinamis ----------------
+def get_buttons(user_id):
+    buttons = []
+
+    # Jika user belum memilih gender
+    if user_id not in user_gender:
+        buttons.append([
+            InlineKeyboardButton("👦 Cowok", callback_data="gender_cowok"),
+            InlineKeyboardButton("👧 Cewek", callback_data="gender_cewek")
+        ])
+    # Jika user memilih gender tapi belum chat
+    elif user_id not in active_chats:
+        buttons.append([InlineKeyboardButton("🔍 Cari Partner", callback_data="find")])
+    # Jika sedang chat
+    elif user_id in active_chats:
+        buttons.append([
+            InlineKeyboardButton("🔁 Next Partner", callback_data="next"),
+            InlineKeyboardButton("❌ Stop Chat", callback_data="stop")
+        ])
+
+    # Admin menu
+    if is_admin(user_id):
+        buttons.append([InlineKeyboardButton("⚙️ Admin Menu", callback_data="admin_menu")])
+
+    return InlineKeyboardMarkup(buttons)
+
+# ---------------- Commands ----------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    is_member = await check_group_membership(update, context)
+    if not is_member:
+        await send_join_prompt(update)
+        return
+
+    guide_text = (
+        "👋 Halo! Selamat datang di *Bot Chat Anonim*.\n\n"
+        "💬 **Cara Pakai:**\n"
+        "1. Pilih gender kamu (jika belum).\n"
+        "2. Klik '🔍 Cari Partner' atau ketik /find.\n"
+        "3. Mulai ngobrol anonim.\n"
+        "4. Gunakan '🔁 Next Partner' untuk ganti partner.\n"
+        "5. Gunakan '❌ Stop Chat' untuk berhenti.\n\n"
+        "⚠️ Pastikan kamu sudah join grup sebelum pakai bot."
+    )
+    await update.message.reply_text(
+        guide_text, parse_mode="Markdown",
+        reply_markup=get_buttons(user_id)
+    )
+
+async def setgender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.chat_id
+    if not context.args:
+        await update.message.reply_text("Gunakan format: /setgender cowok atau /setgender cewek")
+        return
+    gender = context.args[0].lower()
+    if gender in ["cowok", "cewek"]:
+        user_gender[user_id] = gender
+        await update.message.reply_text(
+            f"✅ Gender kamu diset sebagai *{gender}*.", 
+            parse_mode="Markdown",
+            reply_markup=get_buttons(user_id)
+        )
+    else:
+        await update.message.reply_text("❌ Pilihan tidak valid. Gunakan cowok atau cewek.")
+
+# ---------------- Cari Partner ----------------
+async def find(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in banned_users:
+        await update.message.reply_text("🚫 Kamu dibanned oleh admin.")
+        return
+
+    if user_id in waiting_list:
+        waiting_list.remove(user_id)
+
+    await end_chat(user_id, context)
+
+    gender = user_gender.get(user_id)
+    if not gender:
+        await update.message.reply_text("⚠️ Pilih gender dulu:", reply_markup=get_buttons(user_id))
+        return
+
+    # Cari partner lawan gender dulu
+    found_partner = None
+    for pid in waiting_list:
+        if pid != user_id and user_gender.get(pid) != gender:
+            found_partner = pid
+            break
+    if not found_partner:
+        for pid in waiting_list:
+            if pid != user_id:
+                found_partner = pid
+                break
+
+    if found_partner:
+        waiting_list.remove(found_partner)
+        active_chats[user_id] = found_partner
+        active_chats[found_partner] = user_id
+        await context.bot.send_message(user_id, "✅ Partner ditemukan!", reply_markup=get_buttons(user_id))
+        await context.bot.send_message(found_partner, "✅ Partner ditemukan!", reply_markup=get_buttons(found_partner))
+    else:
+        waiting_list.append(user_id)
+        await context.bot.send_message(user_id, "🔎 Menunggu partner...", reply_markup=get_buttons(user_id))
+
+# ---------------- Callback ----------------
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
+
+    # ---------------- Tombol Chat ----------------
+    if data == "next":
+        if user_id in waiting_list:
+            waiting_list.remove(user_id)
+        await end_chat(user_id, context)
+        await find(update, context)
+    elif data == "stop":
+        await end_chat(user_id, context)
+        await query.edit_message_text("❌ Kamu meninggalkan obrolan.", reply_markup=get_buttons(user_id))
+    elif data.startswith("gender_"):
+        gender = data.split("_")[1]
+        user_gender[user_id] = gender
+        await query.edit_message_text(f"✅ Gender kamu diset sebagai *{gender}*.", parse_mode="Markdown", reply_markup=get_buttons(user_id))
+    elif data == "find":
+        await find(update, context)
+
+    # ---------------- Admin Menu ----------------
+    elif data == "admin_menu":
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ Kamu bukan admin.")
+            return
+        keyboard = [
+            [InlineKeyboardButton("🕒 Waiting List", callback_data="admin_waiting")],
+            [InlineKeyboardButton("💬 Active Chats", callback_data="admin_active")],
+            [InlineKeyboardButton("🚫 Banned Users", callback_data="admin_banned")]
+        ]
+        await query.edit_message_text("📊 Menu Admin", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data == "admin_waiting":
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ Kamu bukan admin.")
+            return
+        text = "🕒 Waiting List:\n" + ("\n".join([str(uid) for uid in waiting_list]) if waiting_list else "Tidak ada user menunggu.")
+        await query.edit_message_text(text)
+
+    elif data == "admin_active":
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ Kamu bukan admin.")
+            return
+        if not active_chats:
+            await query.edit_message_text("Tidak ada obrolan aktif.")
+            return
+        keyboard = []
+        seen_pairs = set()
+        for uid, pid in active_chats.items():
+            if (uid, pid) in seen_pairs or (pid, uid) in seen_pairs:
+                continue
+            seen_pairs.add((uid, pid))
+            keyboard.append([
+                InlineKeyboardButton(f"Kick {uid}", callback_data=f"kick_{uid}"),
+                InlineKeyboardButton(f"Ban {uid}", callback_data=f"ban_{uid}")
+            ])
+            keyboard.append([
+                InlineKeyboardButton(f"Kick {pid}", callback_data=f"kick_{pid}"),
+                InlineKeyboardButton(f"Ban {pid}", callback_data=f"ban_{pid}")
+            ])
+        await query.edit_message_text("💬 Active Chats:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data == "admin_banned":
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ Kamu bukan admin.")
+            return
+        text = "🚫 Banned Users:\n" + ("\n".join([str(uid) for uid in banned_users]) if banned_users else "Tidak ada user dibanned.")
+        await query.edit_message_text(text)
+
+    elif data.startswith("kick_") or data.startswith("ban_"):
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ Kamu bukan admin.")
+            return
+        target_id = int(data.split("_")[1])
+        if data.startswith("kick_"):
+            await end_chat(target_id, context)
+            if target_id in waiting_list:
+                waiting_list.remove(target_id)
+            await query.edit_message_text(f"✅ User {target_id} telah dikick.")
+        elif data.startswith("ban_"):
+            banned_users.add(target_id)
+            await end_chat(target_id, context)
+            if target_id in waiting_list:
+                waiting_list.remove(target_id)
+            await query.edit_message_text(f"🚫 User {target_id} telah dibanned.")
+
+# ---------------- Pesan ----------------
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.chat_id
+    if user_id in active_chats:
+        partner_id = active_chats[user_id]
+        await context.bot.send_message(partner_id, update.message.text)
+    else:
+        await update.message.reply_text("❗ Kamu belum punya partner.", reply_markup=get_buttons(user_id))
+
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.chat_id
+    if user_id in active_chats:
+        partner_id = active_chats[user_id]
+        if update.message.photo:
+            await context.bot.send_photo(partner_id, update.message.photo[-1].file_id, caption=update.message.caption or "")
+        elif update.message.video:
+            await context.bot.send_video(partner_id, update.message.video.file_id, caption=update.message.caption or "")
+        elif update.message.sticker:
+            await context.bot.send_sticker(partner_id, update.message.sticker.file_id)
+        elif update.message.voice:
+            await context.bot.send_voice(partner_id, update.message.voice.file_id)
+    else:
+        await update.message.reply_text("📎 Kamu belum punya partner.", reply_markup=get_buttons(user_id))
+
+# ---------------- Run Bot ----------------
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("setgender", setgender))
+app.add_handler(CommandHandler("find", find))
+app.add_handler(CallbackQueryHandler(button_handler))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Sticker.ALL | filters.VOICE, handle_media))
+
+print("🤖 Bot berjalan... Tekan Ctrl+C untuk menghentikan.")
+app.run_polling()
